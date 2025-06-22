@@ -6,7 +6,7 @@
 # @Author: Mark Wang
 # @Email: wangyouan@gamil.com
 
-from path_info import PathInfo
+from .path_info import PathInfo
 
 
 class Constants(PathInfo):
