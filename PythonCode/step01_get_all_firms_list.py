@@ -24,8 +24,14 @@ if __name__ == '__main__':
     output_path = os.path.join(const.TEMP_PATH, "russell3000_glassdoor_page.pkl")
     data.to_pickle(output_path)
 
-    ue_df = pd.read_stata(os.path.join(const.DATA_PATH, 'union_election_match_gvkey.dta'))
-    ue_gvkey_list = ue_df.loc[ue_df[const.YEAR] >= 2008, const.GVKEY].dropna().drop_duplicates()
+    ue_df = pd.read_pickle(os.path.join(const.TEMP_PATH, '1950_2025_union_election_gvkey3.pkl'))
+    ue_gvkey_list = ue_df.loc[ue_df[const.ELECTION_YEAR] >= 2008, const.GVKEY].dropna().drop_duplicates()
 
-    ue_with_web = ue_gvkey_list.to_frame.merge(data, on=[const.GVKEY], how='left')
-    ue_with_web.to_excel(os.path.join(const.TEMP_PATH, '20250622_ue_with_glassdoor_web.xlsx'), index=False)
+    ue_with_web = ue_gvkey_list.to_frame().merge(data, on=[const.GVKEY], how='left')
+
+    ue_with_web2 = pd.read_excel(os.path.join(const.TEMP_PATH, '20250622_ue_with_glassdoor_web_fill_miss.xlsx'))
+    ue_with_web3 = ue_with_web.merge(ue_with_web2[[const.GVKEY, 'glassdoor_web']], on=[const.GVKEY], how='left')
+    ue_with_web3['glassdoor_web'] = ue_with_web3['glassdoor_web_x'].fillna(ue_with_web3['glassdoor_web_y'])
+    
+    ue_with_web3.drop(['glassdoor_web_x', 'glassdoor_web_y'], axis=1).to_excel(
+        os.path.join(const.TEMP_PATH, '20250624_ue_with_glassdoor_web.xlsx'), index=False)
