@@ -18,3 +18,8 @@ class PathInfo(object):
 
     DATABASE_PATH = r'D:\Onedrive\Documents\data'
     COMPUSTAT_PATH = os.path.join(DATABASE_PATH, 'compustat')
+
+    MAJ_ROOT_PATH = r'D:\Onedrive\Temp\Projects\MajorCustomer'
+    MAJ_DATA_PATH = os.path.join(MAJ_ROOT_PATH, 'data')
+    MAJ_OUTPUT_PATH = os.path.join(MAJ_ROOT_PATH, 'regression_data')
+    MAJ_TEMP_PATH = os.path.join(MAJ_ROOT_PATH, 'temp')
