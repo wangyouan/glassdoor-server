@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, Iterator, List, Optional, Tuple
@@ -129,6 +130,68 @@ JOB_KEYWORD_RULES: Dict[str, List[str]] = {
 }
 
 # ---------------------------------------------------------------------------
+# Union exclusion role classification (heuristic based on job titles)
+# These categories identify roles typically excluded from unionization under
+# U.S. NLRA principles or roles less likely to be bargaining-unit workers.
+# This is empirical classification for analysis, NOT legal determination.
+# ---------------------------------------------------------------------------
+
+UNION_EXCLUSION_KEYWORD_RULES: Dict[str, List[str]] = {
+    "role_management_supervisory": [
+        "manager", "director", "executive", "vp ", "vice president", "president",
+        "chief", "ceo", "cfo", "coo", "cto", "cio", "chro", "head of",
+        "managing director", "general manager", "store manager", "operations manager",
+        "supervisor", "team lead", "shift lead", "lead supervisor", "foreman",
+        "forewoman", "principal", "senior leadership",
+    ],
+    "role_legal": [
+        "attorney", "lawyer", "legal", "counsel", "general counsel",
+        "corporate counsel", "associate counsel", "litigation", "paralegal",
+        "law clerk", "legal assistant",
+    ],
+    "role_hr_labor_relations": [
+        "human resources", "hr ", "h.r.", "people operations", "people partner",
+        "hrbp", "recruiter", "recruiting", "talent acquisition", "employee relations",
+        "labor relations", "industrial relations", "compensation", "benefits manager",
+        "payroll manager",
+    ],
+    "role_strategy_corporate": [
+        "strategy", "corporate development", "corp dev", "business strategy",
+        "management consultant", "consultant", "internal consultant", "chief of staff",
+        "transformation", "strategic initiatives", "corporate planning",
+    ],
+    "role_sales_commission": [
+        "sales", "account executive", "account manager", "business development",
+        "bd ", "sales executive", "sales manager", "territory manager", "quota",
+        "commission", "revenue", "channel sales", "enterprise sales",
+        "customer success manager",
+    ],
+    "role_high_level_professional": [
+        "software engineer", "senior software engineer", "staff engineer",
+        "principal engineer", "architect", "data scientist", "senior data scientist",
+        "machine learning engineer", "ml engineer", "quant", "quantitative",
+        "investment banker", "investment banking", "financial analyst",
+        "finance manager", "portfolio manager", "trader", "research scientist",
+        "product manager", "product owner",
+    ],
+    "role_owner_nonemployee": [
+        "founder", "co-founder", "owner", "partner", "managing partner",
+        "independent contractor", "contractor", "freelancer", "self-employed",
+        "consultant contractor",
+    ],
+    "role_rank_and_file_likely": [
+        "operator", "technician", "mechanic", "assembler", "production",
+        "manufacturing", "warehouse", "fulfillment", "logistics", "driver",
+        "delivery", "maintenance", "janitor", "cleaner", "security guard",
+        "retail associate", "cashier", "store associate", "customer service",
+        "customer support", "call center", "contact center", "service representative",
+        "field technician", "installer", "clerk", "hourly", "line worker",
+        "associate", "assistant", "front desk", "receptionist", "server",
+        "cook", "nurse", "caregiver",
+    ],
+}
+
+# ---------------------------------------------------------------------------
 # Final output columns
 # ---------------------------------------------------------------------------
 
@@ -143,8 +206,14 @@ FINAL_COLUMNS: List[str] = [
     # Job / reviewer
     "job_title_raw", "job_title_clean", "role_k1500_clean", "seniority_clean",
     "employment_status_clean", "is_current_employee", "is_former_employee",
-    # Job dummies
+    # Job dummies (general classification)
     *list(JOB_KEYWORD_RULES.keys()),
+    # Union exclusion role dummies (heuristic NLRA-based classification)
+    *list(UNION_EXCLUSION_KEYWORD_RULES.keys()),
+    # Union role classification summary
+    "role_likely_excluded_from_union", "role_likely_unionizable",
+    "role_ambiguous_union_status", "role_exclusion_reason",
+    "role_union_classification",
     # Ratings
     *list(RATING_RENAME.values()),
     # Text lengths
@@ -310,6 +379,98 @@ def create_job_category_dummies(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def build_conservative_keyword_pattern(keywords: List[str]) -> str:
+    """Build conservative regex pattern with non-alnum boundaries."""
+    cleaned = [kw.strip().lower() for kw in keywords if kw and kw.strip()]
+    parts = [rf"(?<![a-z0-9]){re.escape(kw)}(?![a-z0-9])" for kw in cleaned]
+    return "|".join(parts)
+
+
+def create_union_exclusion_role_dummies(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Create binary dummies for union exclusion role categories.
+    
+    These dummies identify roles that are typically excluded from unionization
+    under U.S. NLRA principles (managers, supervisors, confidential employees, etc.)
+    and roles likely to be rank-and-file bargaining unit workers.
+    
+    This is HEURISTIC classification based on job title text analysis for empirical
+    research purposes. It is NOT a legal determination of union eligibility.
+    Ambiguous cases are left unclassified.
+    """
+    # Combine job title, role, and seniority into single search string
+    title_col = df["job_title_clean"].fillna("").astype(str)
+    role_col = df["role_k1500_clean"].fillna("").astype(str)
+    seniority_col = df["seniority_clean"].fillna("").astype(str)
+    combined = " " + title_col + " " + role_col + " " + seniority_col + " "
+
+    # Create category dummies with conservative keyword matching
+    for dummy_col, keywords in UNION_EXCLUSION_KEYWORD_RULES.items():
+        pattern = build_conservative_keyword_pattern(keywords)
+        df[dummy_col] = combined.str.contains(pattern, na=False, regex=True).astype("Int8")
+
+    # Create summary classification variables
+    exclusion_cols = [
+        "role_management_supervisory", "role_legal", "role_hr_labor_relations",
+        "role_strategy_corporate", "role_sales_commission", "role_high_level_professional",
+        "role_owner_nonemployee",
+    ]
+    rank_file_col = "role_rank_and_file_likely"
+
+    # role_likely_excluded_from_union: 1 if any exclusion category matches
+    df["role_likely_excluded_from_union"] = (
+        df[exclusion_cols].sum(axis=1) > 0
+    ).astype("Int8")
+
+    # role_likely_unionizable: 1 if rank-and-file AND not excluded
+    df["role_likely_unionizable"] = (
+        (df[rank_file_col] == 1) & (df["role_likely_excluded_from_union"] == 0)
+    ).astype("Int8")
+
+    # role_ambiguous_union_status: 1 if neither excluded nor unionizable
+    df["role_ambiguous_union_status"] = (
+        (df["role_likely_excluded_from_union"] == 0) & 
+        (df[rank_file_col] == 0)
+    ).astype("Int8")
+
+    # role_exclusion_reason: semicolon-separated list of matched exclusion categories
+    exclusion_reason_names = {
+        "role_management_supervisory": "management_supervisory",
+        "role_legal": "legal",
+        "role_hr_labor_relations": "hr_labor_relations",
+        "role_strategy_corporate": "strategy_corporate",
+        "role_sales_commission": "sales_commission",
+        "role_high_level_professional": "high_level_professional",
+        "role_owner_nonemployee": "owner_nonemployee",
+    }
+    reasons = pd.Series("", index=df.index, dtype="object")
+    for col in exclusion_cols:
+        label = exclusion_reason_names[col]
+        mask = df[col] == 1
+        first_mask = mask & (reasons == "")
+        add_mask = mask & (reasons != "")
+        reasons.loc[first_mask] = label
+        reasons.loc[add_mask] = reasons.loc[add_mask] + ";" + label
+    reasons = reasons.mask(reasons == "", pd.NA)
+    df["role_exclusion_reason"] = reasons.astype("string")
+
+    # role_union_classification: categorical summary
+    df["role_union_classification"] = pd.Series(
+        np.select(
+            [
+                df["role_likely_excluded_from_union"] == 1,
+                df["role_likely_unionizable"] == 1,
+            ],
+            ["likely_excluded", "likely_unionizable"],
+            default="ambiguous",
+        ),
+        index=df.index,
+        dtype="string",
+    )
+
+    return df
+
+
 def create_text_length_vars(df: pd.DataFrame) -> pd.DataFrame:
     text_cols = {
         "summary_len": "review_summary",
@@ -413,8 +574,13 @@ def main() -> None:
     invalid_rating_counts: Dict[str, int] = {}
     employment_status_dist: Dict[str, int] = {}
     job_dummy_counts: Dict[str, int] = {c: 0 for c in JOB_KEYWORD_RULES}
+    union_role_dummy_counts: Dict[str, int] = {c: 0 for c in UNION_EXCLUSION_KEYWORD_RULES}
+    union_classification_dist: Dict[str, int] = {}
     n_current_employee: int = 0
     n_valid_status: int = 0
+    n_likely_excluded: int = 0
+    n_likely_unionizable: int = 0
+    n_ambiguous_union: int = 0
 
     writer: Optional[pq.ParquetWriter] = None
     writer_schema: Optional[pa.Schema] = None
@@ -459,6 +625,9 @@ def main() -> None:
             # 8. Job category dummies
             chunk = create_job_category_dummies(chunk)
 
+            # 8.5 Union exclusion role dummies (NLRA-based heuristic classification)
+            chunk = create_union_exclusion_role_dummies(chunk)
+
             # 9. Text lengths
             chunk = create_text_length_vars(chunk)
 
@@ -493,6 +662,24 @@ def main() -> None:
                 if dc in chunk.columns:
                     job_dummy_counts[dc] += int((chunk[dc] == 1).sum())
 
+            # Accumulate union exclusion role diagnostics
+            for udc in UNION_EXCLUSION_KEYWORD_RULES:
+                if udc in chunk.columns:
+                    union_role_dummy_counts[udc] += int((chunk[udc] == 1).sum())
+
+            if "role_union_classification" in chunk.columns:
+                for val, cnt in chunk["role_union_classification"].value_counts(dropna=True).items():
+                    union_classification_dist[str(val)] = union_classification_dist.get(str(val), 0) + int(cnt)
+
+            if "role_likely_excluded_from_union" in chunk.columns:
+                n_likely_excluded += int((chunk["role_likely_excluded_from_union"] == 1).sum())
+
+            if "role_likely_unionizable" in chunk.columns:
+                n_likely_unionizable += int((chunk["role_likely_unionizable"] == 1).sum())
+
+            if "role_ambiguous_union_status" in chunk.columns:
+                n_ambiguous_union += int((chunk["role_ambiguous_union_status"] == 1).sum())
+
             # --- Write parquet ---
             table = pa.Table.from_pandas(chunk, preserve_index=False)
             if writer is None:
@@ -508,6 +695,14 @@ def main() -> None:
                 f"written={len(chunk):,} | "
                 f"total_written={total_rows_written:,}"
             )
+            if "role_union_classification" in chunk.columns:
+                chunk_cls = chunk["role_union_classification"].value_counts(dropna=False)
+                print(
+                    "  role_union_classification: "
+                    f"excluded={int(chunk_cls.get('likely_excluded', 0)):,}, "
+                    f"unionizable={int(chunk_cls.get('likely_unionizable', 0)):,}, "
+                    f"ambiguous={int(chunk_cls.get('ambiguous', 0)):,}"
+                )
 
     finally:
         if writer is not None:
@@ -527,6 +722,19 @@ def main() -> None:
     share_current = (
         round(n_current_employee / n_valid_status, 4) if n_valid_status > 0 else None
     )
+    share_likely_excluded = (
+        round(n_likely_excluded / total_rows_written, 4) if total_rows_written > 0 else None
+    )
+    share_likely_unionizable = (
+        round(n_likely_unionizable / total_rows_written, 4) if total_rows_written > 0 else None
+    )
+    share_ambiguous_union = (
+        round(n_ambiguous_union / total_rows_written, 4) if total_rows_written > 0 else None
+    )
+    union_role_dummy_shares = {
+        col: round(cnt / total_rows_written, 4) if total_rows_written > 0 else None
+        for col, cnt in union_role_dummy_counts.items()
+    }
 
     diagnostics: Dict[str, object] = {
         "total_rows_read": total_rows_read,
@@ -542,6 +750,12 @@ def main() -> None:
         "rating_means": rating_means,
         "invalid_rating_value_counts": invalid_rating_counts,
         "job_category_dummy_counts": job_dummy_counts,
+        "union_exclusion_role_dummy_counts": union_role_dummy_counts,
+        "union_exclusion_role_dummy_shares": union_role_dummy_shares,
+        "union_classification_distribution": union_classification_dist,
+        "share_likely_excluded_from_union": share_likely_excluded,
+        "share_likely_unionizable": share_likely_unionizable,
+        "share_ambiguous_union_status": share_ambiguous_union,
         "output_file_path": str(OUTPUT_PARQUET_PATH),
         "chunksize": CHUNKSIZE,
         "script_run_timestamp_utc": datetime.now(timezone.utc).isoformat(),
