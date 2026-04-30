@@ -72,6 +72,29 @@ JOB_GROUP_DUMMY_MAP = {
     "non_core_staff": "job_non_core_staff",
 }
 
+UNION_ROLE_DUMMY_COLUMNS = [
+    "role_management_supervisory",
+    "role_legal",
+    "role_hr_labor_relations",
+    "role_strategy_corporate",
+    "role_sales_commission",
+    "role_high_level_professional",
+    "role_owner_nonemployee",
+    "role_rank_and_file_likely",
+]
+
+UNION_ROLE_SUMMARY_FLAG_COLUMNS = [
+    "role_likely_excluded_from_union",
+    "role_likely_unionizable",
+    "role_ambiguous_union_status",
+]
+
+UNION_ROLE_CLASS_VALUES = [
+    "likely_excluded",
+    "likely_unionizable",
+    "ambiguous",
+]
+
 SUBGROUP_RATING_VARS = [
     "GD_rating",
     "GD_career_opp",
@@ -97,6 +120,9 @@ ALL_REQUIRED_COLUMNS = (
     + list(RATING_MAP.keys())
     + TEXT_MEAN_VARS
     + list(JOB_GROUP_DUMMY_MAP.values())
+    + UNION_ROLE_DUMMY_COLUMNS
+    + UNION_ROLE_SUMMARY_FLAG_COLUMNS
+    + ["role_union_classification"]
 )
 
 
@@ -139,6 +165,9 @@ def _new_firm_year_state() -> Dict:
         "subgroup_review_count": defaultdict(int),
         "subgroup_rating_sum": defaultdict(float),
         "subgroup_rating_count": defaultdict(int),
+        "union_role_dummy_sum": defaultdict(float),
+        "union_role_flag_sum": defaultdict(float),
+        "union_role_class_counter": Counter(),
     }
 
 
@@ -169,6 +198,16 @@ def aggregate_chunk_to_firm_year(chunk: pd.DataFrame) -> Tuple[DefaultDict[Tuple
         if dummy in chunk.columns:
             chunk[dummy] = safe_numeric(chunk[dummy]).fillna(0)
             chunk[dummy] = np.where(chunk[dummy] > 0, 1.0, 0.0)
+
+    for dummy in UNION_ROLE_DUMMY_COLUMNS:
+        if dummy in chunk.columns:
+            chunk[dummy] = safe_numeric(chunk[dummy]).fillna(0)
+            chunk[dummy] = np.where(chunk[dummy] > 0, 1.0, 0.0)
+
+    for flag in UNION_ROLE_SUMMARY_FLAG_COLUMNS:
+        if flag in chunk.columns:
+            chunk[flag] = safe_numeric(chunk[flag]).fillna(0)
+            chunk[flag] = np.where(chunk[flag] > 0, 1.0, 0.0)
 
     if "is_current_employee" in chunk.columns:
         chunk["is_current_employee"] = safe_numeric(chunk["is_current_employee"])
@@ -240,6 +279,23 @@ def aggregate_chunk_to_firm_year(chunk: pd.DataFrame) -> Tuple[DefaultDict[Tuple
                         st["subgroup_rating_sum"][key2] += float(r_val)
                         st["subgroup_rating_count"][key2] += 1
 
+        # Union exclusion role shares and counts.
+        for dummy_col in UNION_ROLE_DUMMY_COLUMNS:
+            val = getattr(row, dummy_col, 0.0)
+            if pd.notna(val):
+                st["union_role_dummy_sum"][dummy_col] += float(val)
+
+        for flag_col in UNION_ROLE_SUMMARY_FLAG_COLUMNS:
+            val = getattr(row, flag_col, 0.0)
+            if pd.notna(val):
+                st["union_role_flag_sum"][flag_col] += float(val)
+
+        cls = getattr(row, "role_union_classification", None)
+        if pd.notna(cls):
+            cls_s = str(cls).strip()
+            if cls_s in UNION_ROLE_CLASS_VALUES:
+                st["union_role_class_counter"][cls_s] += 1
+
     return partial, before, used
 
 
@@ -277,6 +333,12 @@ def combine_partial_aggregates(
             st1["subgroup_rating_sum"][k2] += v2
         for k2, v2 in st2["subgroup_rating_count"].items():
             st1["subgroup_rating_count"][k2] += v2
+
+        for k2, v2 in st2["union_role_dummy_sum"].items():
+            st1["union_role_dummy_sum"][k2] += v2
+        for k2, v2 in st2["union_role_flag_sum"].items():
+            st1["union_role_flag_sum"][k2] += v2
+        st1["union_role_class_counter"].update(st2["union_role_class_counter"])
 
 
 def finalize_firm_year_panel(combined: DefaultDict[Tuple[str, int], Dict]) -> pd.DataFrame:
@@ -338,10 +400,47 @@ def finalize_firm_year_panel(combined: DefaultDict[Tuple[str, int], Dict]) -> pd
     return out
 
 
-def write_outputs(df: pd.DataFrame, major_path: Path, union_path: Path) -> None:
+def add_union_role_aggregates(
+    union_panel: pd.DataFrame,
+    combined: DefaultDict[Tuple[str, int], Dict],
+) -> pd.DataFrame:
+    if union_panel.empty:
+        return union_panel
+
+    extra_rows: List[Dict] = []
+    for (gvkey, year), st in combined.items():
+        n_reviews = int(st["n_reviews"])
+        row: Dict = {
+            "gvkey": str(gvkey),
+            "review_year": int(year),
+        }
+
+        for dummy_col in UNION_ROLE_DUMMY_COLUMNS:
+            sm = float(st["union_role_dummy_sum"].get(dummy_col, 0.0))
+            row[f"share_{dummy_col}"] = (sm / n_reviews) if n_reviews > 0 else np.nan
+
+        for flag_col in UNION_ROLE_SUMMARY_FLAG_COLUMNS:
+            sm = float(st["union_role_flag_sum"].get(flag_col, 0.0))
+            row[f"n_{flag_col}"] = int(round(sm))
+            row[f"share_{flag_col}"] = (sm / n_reviews) if n_reviews > 0 else np.nan
+
+        for cls in UNION_ROLE_CLASS_VALUES:
+            cnt = int(st["union_role_class_counter"].get(cls, 0))
+            row[f"n_role_class_{cls}"] = cnt
+            row[f"share_role_class_{cls}"] = (cnt / n_reviews) if n_reviews > 0 else np.nan
+
+        row["role_union_classification_mode"] = mode_string(st["union_role_class_counter"])
+        extra_rows.append(row)
+
+    extra_df = pd.DataFrame(extra_rows)
+    out = union_panel.merge(extra_df, on=["gvkey", "review_year"], how="left")
+    return out
+
+
+def write_outputs(major_df: pd.DataFrame, union_df: pd.DataFrame, major_path: Path, union_path: Path) -> None:
     major_path.parent.mkdir(parents=True, exist_ok=True)
-    df.to_parquet(major_path, index=False, compression="snappy")
-    df.to_parquet(union_path, index=False, compression="snappy")
+    major_df.to_parquet(major_path, index=False, compression="snappy")
+    union_df.to_parquet(union_path, index=False, compression="snappy")
 
 
 def main() -> None:
@@ -373,34 +472,38 @@ def main() -> None:
             f"firm_year_keys_so_far={len(combined):,}"
         )
 
-    panel = finalize_firm_year_panel(combined)
+    major_panel = finalize_firm_year_panel(combined)
+    union_panel = add_union_role_aggregates(major_panel.copy(), combined)
 
     # Validate one row per gvkey x review_year
-    if not panel.empty:
-        dup = panel.duplicated(["gvkey", "review_year"]).sum()
+    if not major_panel.empty:
+        dup = major_panel.duplicated(["gvkey", "review_year"]).sum()
         if dup > 0:
             raise ValueError(f"Found duplicate gvkey-review_year rows after aggregation: {dup}")
 
-    write_outputs(panel, OUTPUT_MAJOR_PATH, OUTPUT_UNION_PATH)
+    # Keep major-customer output schema unchanged; union output contains extra role aggregates.
+    write_outputs(major_panel, union_panel, OUTPUT_MAJOR_PATH, OUTPUT_UNION_PATH)
 
-    n_fy = len(panel)
-    n_gvkey = int(panel["gvkey"].nunique()) if n_fy > 0 else 0
-    year_min = int(panel["review_year"].min()) if n_fy > 0 else None
-    year_max = int(panel["review_year"].max()) if n_fy > 0 else None
+    n_fy = len(major_panel)
+    n_gvkey = int(major_panel["gvkey"].nunique()) if n_fy > 0 else 0
+    year_min = int(major_panel["review_year"].min()) if n_fy > 0 else None
+    year_max = int(major_panel["review_year"].max()) if n_fy > 0 else None
 
     if n_fy > 0:
-        n_reviews_desc = panel["n_reviews"].describe().to_dict()
+        n_reviews_desc = major_panel["n_reviews"].describe().to_dict()
         n_reviews_dist = {k: (float(v) if pd.notna(v) else None) for k, v in n_reviews_desc.items()}
     else:
         n_reviews_dist = {}
 
-    n_has_10 = int(panel["has_10_reviews"].sum()) if n_fy > 0 else 0
-    n_has_25 = int(panel["has_25_reviews"].sum()) if n_fy > 0 else 0
-    n_has_50 = int(panel["has_50_reviews"].sum()) if n_fy > 0 else 0
+    n_has_10 = int(major_panel["has_10_reviews"].sum()) if n_fy > 0 else 0
+    n_has_25 = int(major_panel["has_25_reviews"].sum()) if n_fy > 0 else 0
+    n_has_50 = int(major_panel["has_50_reviews"].sum()) if n_fy > 0 else 0
 
     major_missingness = {}
     for col in RATING_MAP.values():
-        major_missingness[col] = float(panel[col].isna().mean()) if n_fy > 0 else None
+        major_missingness[col] = float(major_panel[col].isna().mean()) if n_fy > 0 else None
+
+    union_added_columns = sorted([c for c in union_panel.columns if c not in major_panel.columns])
 
     diagnostics = {
         "input_path": str(INPUT_PATH),
@@ -420,6 +523,9 @@ def main() -> None:
         "share_firm_year_has_25_reviews": (n_has_25 / n_fy) if n_fy > 0 else None,
         "share_firm_year_has_50_reviews": (n_has_50 / n_fy) if n_fy > 0 else None,
         "missingness_rates_major_ratings": major_missingness,
+        "major_output_column_count": int(len(major_panel.columns)),
+        "union_output_column_count": int(len(union_panel.columns)),
+        "union_added_columns": union_added_columns,
         "script_run_timestamp_utc": datetime.now(timezone.utc).isoformat(),
     }
 
