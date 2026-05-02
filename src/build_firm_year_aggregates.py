@@ -95,6 +95,17 @@ UNION_ROLE_CLASS_VALUES = [
     "ambiguous",
 ]
 
+# Role groups for which we compute per-group GD rating means.
+# Maps flag column name → output prefix name.
+UNION_ROLE_RATING_GROUPS = {
+    "role_likely_excluded_from_union": "role_likely_excluded_from_union",
+    "role_likely_unionizable": "role_likely_unionizable",
+    "role_ambiguous_union_status": "role_ambiguous_union_status",
+}
+
+# All 10 GD rating dimensions to aggregate per role group.
+ALL_GD_RATINGS = list(RATING_MAP.values())
+
 SUBGROUP_RATING_VARS = [
     "GD_rating",
     "GD_career_opp",
@@ -168,6 +179,8 @@ def _new_firm_year_state() -> Dict:
         "union_role_dummy_sum": defaultdict(float),
         "union_role_flag_sum": defaultdict(float),
         "union_role_class_counter": Counter(),
+        "union_role_rating_sum": defaultdict(float),
+        "union_role_rating_count": defaultdict(int),
     }
 
 
@@ -296,6 +309,17 @@ def aggregate_chunk_to_firm_year(chunk: pd.DataFrame) -> Tuple[DefaultDict[Tuple
             if cls_s in UNION_ROLE_CLASS_VALUES:
                 st["union_role_class_counter"][cls_s] += 1
 
+        # Per-role-group GD rating accumulation.
+        for flag_col, prefix in UNION_ROLE_RATING_GROUPS.items():
+            flag_val = getattr(row, flag_col, 0.0)
+            if flag_val == 1:
+                for src, dst in RATING_MAP.items():
+                    r_val = getattr(row, src, np.nan)
+                    if pd.notna(r_val):
+                        rkey = f"{prefix}::{dst}"
+                        st["union_role_rating_sum"][rkey] += float(r_val)
+                        st["union_role_rating_count"][rkey] += 1
+
     return partial, before, used
 
 
@@ -339,6 +363,11 @@ def combine_partial_aggregates(
         for k2, v2 in st2["union_role_flag_sum"].items():
             st1["union_role_flag_sum"][k2] += v2
         st1["union_role_class_counter"].update(st2["union_role_class_counter"])
+
+        for k2, v2 in st2["union_role_rating_sum"].items():
+            st1["union_role_rating_sum"][k2] += v2
+        for k2, v2 in st2["union_role_rating_count"].items():
+            st1["union_role_rating_count"][k2] += v2
 
 
 def finalize_firm_year_panel(combined: DefaultDict[Tuple[str, int], Dict]) -> pd.DataFrame:
@@ -430,6 +459,16 @@ def add_union_role_aggregates(
             row[f"share_role_class_{cls}"] = (cnt / n_reviews) if n_reviews > 0 else np.nan
 
         row["role_union_classification_mode"] = mode_string(st["union_role_class_counter"])
+
+        # Per-role-group GD rating means and counts.
+        for flag_col, prefix in UNION_ROLE_RATING_GROUPS.items():
+            for dst in ALL_GD_RATINGS:
+                rkey = f"{prefix}::{dst}"
+                cnt = int(st["union_role_rating_count"].get(rkey, 0))
+                sm = float(st["union_role_rating_sum"].get(rkey, 0.0))
+                row[f"{prefix}_{dst}"] = (sm / cnt) if cnt > 0 else np.nan
+                row[f"n_{prefix}_{dst}"] = cnt
+
         extra_rows.append(row)
 
     extra_df = pd.DataFrame(extra_rows)
@@ -504,6 +543,31 @@ def main() -> None:
         major_missingness[col] = float(major_panel[col].isna().mean()) if n_fy > 0 else None
 
     union_added_columns = sorted([c for c in union_panel.columns if c not in major_panel.columns])
+
+    # Role subgroup rating diagnostics
+    has_flag = {col: (col in major_panel.columns) for col in UNION_ROLE_SUMMARY_FLAG_COLUMNS}
+    print("\nRole flag column availability in review-level input (via aggregate):")
+    for col, present in has_flag.items():
+        print(f"  {col}: {'YES' if present else 'NO - role columns missing from review-level file!'}")
+
+    role_rating_cols = [c for c in union_panel.columns if any(
+        c.startswith(f"{p}_GD_") for p in UNION_ROLE_RATING_GROUPS.values()
+    ) and not c.startswith("n_")]
+    print(f"\nFirst 20 role subgroup rating columns created:")
+    print([c for c in role_rating_cols[:20]])
+
+    for col_name in ["role_likely_unionizable_GD_rating", "role_likely_excluded_from_union_GD_rating"]:
+        if col_name in union_panel.columns:
+            n_nonmiss = int(union_panel[col_name].notna().sum())
+            print(f"  {col_name}: {n_nonmiss:,} non-missing firm-years")
+        else:
+            print(f"  WARNING: {col_name} missing from union panel")
+
+    for flag_col in ["role_likely_excluded_from_union", "role_likely_unionizable"]:
+        n_col = f"n_{flag_col}"
+        if n_col in union_panel.columns:
+            n_pos = int((union_panel[n_col] > 0).sum())
+            print(f"  Firm-years with {n_col} > 0: {n_pos:,}")
 
     diagnostics = {
         "input_path": str(INPUT_PATH),
