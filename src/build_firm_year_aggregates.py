@@ -98,9 +98,15 @@ UNION_ROLE_CLASS_VALUES = [
 # Role groups for which we compute per-group GD rating means.
 # Maps flag column name → output prefix name.
 UNION_ROLE_RATING_GROUPS = {
-    "role_likely_excluded_from_union": "role_likely_excluded_from_union",
-    "role_likely_unionizable": "role_likely_unionizable",
-    "role_ambiguous_union_status": "role_ambiguous_union_status",
+    "role_likely_excluded_from_union": "notu",
+    "role_likely_unionizable": "mayu",
+    "role_ambiguous_union_status": "ambu",
+}
+
+UNION_ROLE_SHORT_PREFIX = {
+    "role_likely_excluded_from_union": "notu",
+    "role_likely_unionizable": "mayu",
+    "role_ambiguous_union_status": "ambu",
 }
 
 # All 10 GD rating dimensions to aggregate per role group.
@@ -450,8 +456,9 @@ def add_union_role_aggregates(
 
         for flag_col in UNION_ROLE_SUMMARY_FLAG_COLUMNS:
             sm = float(st["union_role_flag_sum"].get(flag_col, 0.0))
-            row[f"n_{flag_col}"] = int(round(sm))
-            row[f"share_{flag_col}"] = (sm / n_reviews) if n_reviews > 0 else np.nan
+            short = UNION_ROLE_SHORT_PREFIX[flag_col]
+            row[f"n_{short}"] = int(round(sm))
+            row[f"share_{short}"] = (sm / n_reviews) if n_reviews > 0 else np.nan
 
         for cls in UNION_ROLE_CLASS_VALUES:
             cnt = int(st["union_role_class_counter"].get(cls, 0))
@@ -556,15 +563,15 @@ def main() -> None:
     print(f"\nFirst 20 role subgroup rating columns created:")
     print([c for c in role_rating_cols[:20]])
 
-    for col_name in ["role_likely_unionizable_GD_rating", "role_likely_excluded_from_union_GD_rating"]:
+    for col_name in ["mayu_GD_rating", "notu_GD_rating"]:
         if col_name in union_panel.columns:
             n_nonmiss = int(union_panel[col_name].notna().sum())
             print(f"  {col_name}: {n_nonmiss:,} non-missing firm-years")
         else:
             print(f"  WARNING: {col_name} missing from union panel")
 
-    for flag_col in ["role_likely_excluded_from_union", "role_likely_unionizable"]:
-        n_col = f"n_{flag_col}"
+    for short in ["notu", "mayu"]:
+        n_col = f"n_{short}"
         if n_col in union_panel.columns:
             n_pos = int((union_panel[n_col] > 0).sum())
             print(f"  Firm-years with {n_col} > 0: {n_pos:,}")
